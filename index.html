@@ -236,6 +236,44 @@ function defensePositions(){
 }
 
 //==================================================================
+// FIELDING PHYSICS / HELPERS
+//==================================================================
+const FENCE_Y      = H*0.40;     // outfield fence line (screen y)
+const FIELDER_SPEED= 3.0;        // px / frame a fielder runs
+const THROW_SPEED  = 9.5;        // px / frame a thrown ball travels
+const TRANSFER     = 8;          // frames to glove->hand before a throw
+const ROLL_SPEED   = 7.0;        // px / frame a grounder rolls
+const RUNNER_FIRST = 74;         // frames for the batter to leg out first
+const RUNNER_CO    = 1/RUNNER_FIRST; // base-coords advanced per frame
+
+function dist(ax,ay,bx,by){ return Math.hypot(ax-bx, ay-by); }
+
+// rebuild the 9 mutable fielder sprites at their home spots
+function resetFielders(){
+  G.fielders = defensePositions().map(p=>({
+    role:p.role, x:p.x, y:p.y, hx:p.x, hy:p.y,
+    hasBall:false, running:false
+  }));
+}
+
+// move a fielder toward (tx,ty); returns true once basically there
+function moveToward(f, tx, ty, spd){
+  const d = dist(f.x,f.y,tx,ty);
+  if(d <= spd){ f.x=tx; f.y=ty; f.running=false; return true; }
+  f.x += (tx-f.x)/d*spd;
+  f.y += (ty-f.y)/d*spd;
+  f.running = true;
+  return false;
+}
+
+// screen position for a continuous base-coordinate (0=home,1=1st,2=2nd,3=3rd,4=home)
+function basePos(coord){
+  const k=Math.floor(coord), f=coord-k;
+  const A=BASES[k%4], B=BASES[(k+1)%4];
+  return { x:A.x+(B.x-A.x)*f, y:A.y+(B.y-A.y)*f };
+}
+
+//==================================================================
 // GAME STATE
 //==================================================================
 const INNINGS = 3;
@@ -257,13 +295,15 @@ function newGame(){
     pitch:null,
     swing:null,
     runners:[],            // active runner animations {from,to,p,onBase}
-    ball:null,             // ball in play {x,y, ...}
-    fielderAnim:null,
+    ball:null,             // pitched / foul ball {x,y, ...}
+    fielders:[],           // mutable fielder sprites (run/catch/throw)
+    play:null,             // active batted-ball fielding sim
     cpuTimer:0,
     flash:null,
   };
   G.lineScore.Dodgers = [];
   G.lineScore.Yeeters = [];
+  resetFielders();
   buildBoxScore();
   updateScoreboard();
   updateCounts();
@@ -523,48 +563,40 @@ function render(){
   ctx.clearRect(0,0,W,H);
   drawDiamond();
 
-  const def = defensePositions();
-  const fld = G.fieldingTeam;
+  // catcher's umpire (behind the catcher's home spot)
+  drawUmpire(G.fielders[1].hx+24, G.fielders[1].hy+18);
 
-  // draw fielders (skip pitcher/catcher - drawn specially below for animation)
-  for(let i=2;i<def.length;i++){
-    drawPlayer(def[i].x, def[i].y, fld, {faceAway:true, scale:0.92});
-    label(def[i].x, def[i].y-30, def[i].role);
+  // all nine fielders (mutable — they run, catch, throw)
+  drawFielders();
+
+  // base runners that are standing on a base between plays
+  if(!G.play){
+    G.bases.forEach((occ,i)=>{
+      if(occ){ const b=BASES[i+1]; drawPlayer(b.x, b.y-14, G.battingTeam, {scale:0.85}); }
+    });
   }
 
-  // catcher (behind plate, facing away from us toward pitcher)
-  const catcher = def[1];
-  drawPlayer(catcher.x, catcher.y, fld, {faceAway:true, armPose:"reach", rx:0, ry:-14, scale:0.96});
-  // catcher mitt
-  ctx.fillStyle="#7a4a23"; ctx.beginPath(); ctx.arc(catcher.x, catcher.y-16, 6, 0,7); ctx.fill();
+  // active runners during a batted ball
+  if(G.play){
+    G.play.runners.forEach(r=>{
+      if(r.scored || r.removed) return;
+      const p=basePos(r.coord);
+      drawPlayer(p.x, p.y-12, G.battingTeam, {run:r.coord!==r.target, scale:0.85});
+    });
+  }
 
-  // umpire just behind the catcher
-  drawUmpire(catcher.x+24, catcher.y+18);
+  // batter at the plate (only when no ball is in play)
+  if(!G.play) drawBatter();
 
-  // pitcher (animated)
-  drawPitcher();
-
-  // base runners (occupied bases get a little runner standing)
-  G.bases.forEach((occ,i)=>{
-    if(occ){
-      const b=BASES[i+1];
-      drawPlayer(b.x, b.y-14, G.battingTeam, {scale:0.85});
-    }
-  });
-
-  // animated runners moving between bases
-  G.runners.forEach(r=>{
-    const a=BASES[r.from], b=BASES[r.to];
-    const x=a.x+(b.x-a.x)*r.p, y=a.y+(b.y-a.y)*r.p;
-    drawPlayer(x,y,G.battingTeam,{run:true,scale:0.85});
-  });
-
-  // batter at the plate (animated swing)
-  drawBatter();
-
-  // ball
+  // pitched / foul ball
   if(G.ball){
     drawBall(G.ball.x, G.ball.y, G.ball.r||6);
+  }
+
+  // batted ball in flight + any throw
+  if(G.play){
+    if(G.play.ball) drawAirBall(G.play.ball);
+    if(G.play.throw) drawAirBall(G.play.throw);
   }
 
   // on-field count strip (top-left HUD)
@@ -584,6 +616,39 @@ function drawBall(x,y,r){
   ctx.beginPath(); ctx.arc(x-r*0.4,y, r*0.9, -0.6, 0.6); ctx.stroke();
   ctx.beginPath(); ctx.arc(x+r*0.4,y, r*0.9, Math.PI-0.6, Math.PI+0.6); ctx.stroke();
   ctx.restore();
+}
+
+// draw all nine fielders from the mutable sprite list
+function drawFielders(){
+  const fld=G.fieldingTeam;
+  G.fielders.forEach((f,i)=>{
+    if(f.role==="P"){
+      // pitcher: animate arm during the actual pitch, else stand/run
+      let arm=-Math.PI/2;
+      if(G.pitch && G.pitch.windup) arm=-Math.PI/2 - Math.sin(G.pitch.windupP*Math.PI)*2.2;
+      else if(G.pitch && G.pitch.released) arm=-Math.PI/2 + 1.6;
+      drawPlayer(f.x, f.y, fld, {faceAway:true, armPose:"pitch", armAngle:arm, scale:0.98, run:f.running});
+    } else if(f.role==="C"){
+      drawPlayer(f.x, f.y, fld, {faceAway:true, armPose:"reach", rx:0, ry:-14, scale:0.96, run:f.running});
+      ctx.fillStyle="#7a4a23"; ctx.beginPath(); ctx.arc(f.x, f.y-16, 6, 0,7); ctx.fill();
+    } else {
+      drawPlayer(f.x, f.y, fld, {faceAway:true, scale:0.92, run:f.running});
+    }
+    label(f.x, f.y-30, f.role);
+    // ball tucked in the glove
+    if(f.hasBall){ ctx.save(); drawBall(f.x+10*0.92, f.y-2, 5); ctx.restore(); }
+  });
+}
+
+// a ball with height: shadow on the ground + ball lifted by z
+function drawAirBall(b){
+  const gx=b.gx, gy=b.gy, z=b.z||0;
+  ctx.save();
+  ctx.fillStyle="rgba(0,0,0,.25)";
+  const sw=Math.max(2, 6 - z*0.02);
+  ctx.beginPath(); ctx.ellipse(gx, gy, sw, sw*0.45, 0, 0, 7); ctx.fill();
+  ctx.restore();
+  drawBall(gx, gy - z, b.r||6);
 }
 
 function drawHUD(){
@@ -772,130 +837,222 @@ function launchFoul(){
   }, 950);
 }
 
-function launchHit(quality){
-  // Decide trajectory + outcome
-  // direction angle across the field
-  const ang = (Math.random()*1.0 - 0.5); // -.5..+.5 radians spread
-  let power, outcome;
-  if(quality==="homerun"){
-    power=1.0; outcome="HR";
-  } else { // "hit" or "contact"
-    if(quality==="hit"){
-      // single/double/triple weighted
-      const r=Math.random();
-      outcome = r<0.55? "1B" : r<0.85? "2B" : "3B";
-      power=0.55 + Math.random()*0.25;
-    } else {
-      // weak contact: groundout/flyout, occasional infield single
-      const r=Math.random();
-      outcome = r<0.7? "OUT" : "1B";
-      power=0.3 + Math.random()*0.2;
-    }
+function updateBallInPlay(){
+  // only the foul ball uses this now (pitched ball is driven by updatePitch)
+  const b=G.ball; if(!b || !b.foul) return;
+  b.x+=b.vx; b.y+=b.vy; b.vy+=b.g; b.life++;
+}
+
+//==================================================================
+// BATTED-BALL FIELDING SIMULATION
+//   fielders run to the ball, catch it (fly outs) or field it,
+//   then throw to a base. Safe/out emerges from the timing race.
+//==================================================================
+function launchHit(quality){ setupPlay(quality); }
+
+function setupPlay(quality){
+  const ang = (Math.random()*1.0 - 0.5);   // fair-territory spread
+  let type, depth, catchBonus;
+  if(quality==="homerun"){ type="fly"; depth=1.12; catchBonus=0; }
+  else if(quality==="hit"){
+    // well-struck: mostly liners & grounders that find gaps -> hard to catch
+    const r=Math.random();
+    type = r<0.45?"liner" : r<0.85?"grounder" : "fly";
+    depth = 0.60 + Math.random()*0.40;
+    catchBonus = -28;
+  } else { // weak contact: pop-ups & soft grounders -> easy outs
+    const r=Math.random();
+    type = r<0.50?"grounder" : r<0.80?"popup" : "liner";
+    depth = 0.18 + Math.random()*0.34;
+    catchBonus = 6;
   }
-  // launch animation: ball flies from plate outward
-  const dist = power; // 0..1
-  const targetX = HOME.x + Math.sin(ang)* (W*0.42)*dist;
-  const targetY = HOME.y - Math.cos(ang)* (H*0.55)*dist - 30;
-  G.ball={
-    x:HOME.x-30, y:HOME.y-14,
+
+  // landing point on screen
+  let lx = HOME.x + Math.sin(ang)*W*0.46*depth;
+  let ly = HOME.y - Math.cos(ang)*(HOME.y-FENCE_Y)*depth;
+  lx = Math.max(34, Math.min(W-34, lx));
+  ly = Math.max(FENCE_Y-34, ly);
+
+  // nearest fielder to the landing spot pursues
+  let fi=0, best=1e9;
+  G.fielders.forEach((f,i)=>{ const d=dist(f.hx,f.hy,lx,ly); if(d<best){best=d;fi=i;} });
+  const fieldRun = best/FIELDER_SPEED;
+
+  let hang, arc, slack=0, flightFrames, willCatch=false;
+  if(type==="grounder"){
+    arc=0;
+    flightFrames = Math.max(8, dist(HOME.x,HOME.y,lx,ly)/ROLL_SPEED);
+    hang=flightFrames;
+  } else {
+    if(type==="popup"){ hang=72;            arc=130;          slack=26; }
+    else if(type==="fly"){ hang=58+depth*55; arc=70+depth*45;  slack=6;  }
+    else { hang=30+depth*22; arc=20; slack=-4; }   // liner (hard to catch)
+    flightFrames=hang;
+    willCatch = quality!=="homerun" && depth<1.0 && (fieldRun <= hang+slack+catchBonus);
+  }
+
+  // runners: current base occupants + the batter
+  const runners=[];
+  for(let i=1;i<=3;i++){
+    if(G.bases[i-1]) runners.push({coord:i, origin:i, target:i, batter:false, scored:false, out:false});
+  }
+  const batter={coord:0, origin:0, target:1, batter:true, scored:false, out:false};
+  runners.push(batter);
+  if(quality==="homerun") runners.forEach(r=> r.target=4);  // everybody trots home
+
+  G.play={
+    quality, type, ang, depth, lx, ly, fi,
+    frame:0, stage:"flight", flightFrames, hang, arc, willCatch,
+    runnersGo:(type==="grounder" || quality==="homerun"),
+    ball:{ gx:HOME.x-30, gy:HOME.y-14, z:0, r:6 },
     sx:HOME.x-30, sy:HOME.y-14,
-    tx:targetX, ty:targetY,
-    p:0, speed:0.025+power*0.02, arc: (quality==="homerun"?90: 30+power*60),
-    inPlay:true, outcome, quality
+    runners, batter, throw:null, outcome:null, doneTimer:0
   };
   G.phase="result";
+  showSwingMeter(false);
 
   const flair = quality==="homerun" ? "💥 DINGER!! 💥" :
-                outcome==="1B" ? "BASE HIT!" :
-                outcome==="2B" ? "DOUBLE! 🏃" :
-                outcome==="3B" ? "TRIPLE!! 🏃💨" : "IN PLAY...";
-  showMsg(flair, 1100, quality==="homerun"?"#ffd23a":"#7dffb0");
-
-  // schedule the result resolution after the ball-flight animation
-  G.ball.onLand = ()=> applyOutcome(outcome);
+                type==="grounder" ? "GROUND BALL!" :
+                type==="popup"    ? "POP-UP!" :
+                type==="liner"    ? "LINE DRIVE!" : "FLY BALL!";
+  showMsg(flair, 850, quality==="homerun"?"#ffd23a":"#fff");
 }
 
-function updateBallInPlay(){
-  const b=G.ball; if(!b) return;
-  if(b.foul){
-    b.x+=b.vx; b.y+=b.vy; b.vy+=b.g; b.life++;
-    return;
-  }
-  if(b.inPlay){
-    b.p+=b.speed;
-    const e=Math.min(1,b.p);
-    b.x=b.sx+(b.tx-b.sx)*e;
-    // parabola for height
-    b.y=b.sy+(b.ty-b.sy)*e - Math.sin(e*Math.PI)*b.arc;
-    b.r=6 - e*2;
-    if(b.p>=1 && !b.landed){
-      b.landed=true;
-      if(b.onLand) b.onLand();
+function advancePlayRunners(){
+  G.play.runners.forEach(r=>{
+    if(r.scored || r.out) return;
+    if(r.coord < r.target){
+      r.coord = Math.min(r.target, r.coord + RUNNER_CO);
+      if(r.coord >= 4-1e-6){ r.scored=true; r.coord=4; }
     }
-  }
-}
-
-//==================================================================
-// OUTCOME RESOLUTION (baseball rules)
-//==================================================================
-function applyOutcome(outcome){
-  if(outcome==="OUT"){
-    G.ball=null;
-    recordOut("OUT! 🧤");
-    return;
-  }
-  // a hit: advance runners
-  let advance = outcome==="HR"?4 : outcome==="3B"?3 : outcome==="2B"?2 : 1;
-  G.ball=null;
-  advanceRunners(advance, outcome);
-}
-
-function advanceRunners(numBases, label){
-  // animate: existing runners + batter advance numBases
-  let runsScored=0;
-  const newBases=[false,false,false];
-  G.runners=[];
-
-  // helper to push runner animation from base index a -> a+numBases
-  function moveRunner(fromBaseIdx){
-    let dest=fromBaseIdx+numBases;
-    if(dest>=4){ runsScored++; // scored
-      G.runners.push({from:fromBaseIdx, to:0, p:0, score:true, chain:fromBaseIdx});
-    } else {
-      newBases[dest-1]=true;
-      G.runners.push({from:fromBaseIdx, to:dest, p:0});
-    }
-  }
-  // runners on 3rd,2nd,1st (indices 3,2,1 in BASES)
-  for(let i=3;i>=1;i--){
-    if(G.bases[i-1]) moveRunner(i);
-  }
-  // batter from home(0)
-  moveRunner(0);
-
-  G.bases=newBases;
-  // animate runners then finish
-  G.runnersResolve = ()=>{
-    if(runsScored>0){
-      addRuns(runsScored);
-      showMsg(`${runsScored} RUN${runsScored>1?"S":""} SCORE${runsScored>1?"":"S"}! 🎉`, 1300, "#ffd23a");
-    }
-    G.runners=[];
-    setTimeout(()=> nextBatter(), 600);
-  };
-}
-
-function updateRunners(){
-  if(G.runners.length===0) return;
-  let done=true;
-  G.runners.forEach(r=>{
-    r.p+=0.06;
-    if(r.p<1) done=false;
-    else r.p=1;
   });
-  if(done && G.runnersResolve){
-    const fn=G.runnersResolve; G.runnersResolve=null;
-    fn();
+}
+
+function runnersSettled(){
+  return G.play.runners.every(r=> r.scored || r.out || r.coord >= r.target-0.02);
+}
+
+function updatePlay(){
+  const P=G.play; if(!P) return;
+  P.frame++;
+  const f=G.fielders[P.fi];
+  if(P.runnersGo) advancePlayRunners();
+
+  if(P.stage==="flight"){
+    const t=Math.min(1, P.frame/P.flightFrames);
+    P.ball.gx = P.sx+(P.lx-P.sx)*t;
+    P.ball.gy = P.sy+(P.ly-P.sy)*t;
+    P.ball.z  = P.arc>0 ? Math.sin(Math.PI*t)*P.arc : 0;
+    P.ball.r  = 6 - t*2;
+    if(P.type==="grounder") moveToward(f, P.ball.gx, P.ball.gy, FIELDER_SPEED);
+    else                    moveToward(f, P.lx, P.ly, FIELDER_SPEED);
+
+    if(t>=1){
+      if(P.quality==="homerun"){
+        P.ball=null; P.outcome={kind:"hr", out:false}; P.runnersGo=true; P.stage="throw";
+      } else if(P.type!=="grounder" && P.willCatch && dist(f.x,f.y,P.lx,P.ly)<24){
+        // caught on the fly!
+        f.hasBall=true; f.x=P.lx; f.y=P.ly; P.ball=null;
+        P.outcome={ kind:(P.type==="liner"?"lineout":P.type==="popup"?"popout":"flyout"), out:true };
+        P.batter.target=1; P.batter.out=true;
+        P.runners.forEach(r=>{ if(!r.batter) r.target=r.origin; });
+        P.runnersGo=true; P.stage="caught"; P.doneTimer=40;
+        showMsg(P.outcome.kind.toUpperCase()+"! 🧤", 1000, "#ff6b6b");
+      } else {
+        P.ball.z=0; P.runnersGo=true; P.stage="secure";
+      }
+    }
+    return;
+  }
+
+  if(P.stage==="secure"){
+    P.ball.gx=P.lx; P.ball.gy=P.ly; P.ball.z=0;
+    if(moveToward(f, P.lx, P.ly, FIELDER_SPEED)){
+      f.hasBall=true; P.ball=null;
+      decidePlay();
+      P.stage="throw";
+    }
+    return;
+  }
+
+  if(P.stage==="throw"){
+    if(P.throw){
+      P.throw.t = Math.min(1, P.throw.t + THROW_SPEED/P.throw.len);
+      P.throw.gx = P.throw.x0+(P.throw.x1-P.throw.x0)*P.throw.t;
+      P.throw.gy = P.throw.y0+(P.throw.y1-P.throw.y0)*P.throw.t;
+      P.throw.z  = Math.sin(Math.PI*P.throw.t)*22;
+      if(P.throw.t>=1) P.throw=null;
+    }
+    if(!P.throw && runnersSettled()) finalizePlay();
+    return;
+  }
+
+  if(P.stage==="caught"){
+    P.doneTimer--;
+    if(P.doneTimer<=0 && runnersSettled()) finalizePlay();
+    return;
+  }
+}
+
+function decidePlay(){
+  const P=G.play, f=G.fielders[P.fi];
+  const depthRatio=(HOME.y-P.ly)/(HOME.y-FENCE_Y);
+  const infield = depthRatio < 0.42;
+  let kind, bases=0, out=false;
+
+  if(P.type==="grounder" && infield){
+    const throwFrames = dist(P.lx,P.ly,B1.x,B1.y)/THROW_SPEED + TRANSFER;
+    out = (P.frame + throwFrames) < RUNNER_FIRST;       // beat the runner?
+    if(out) kind="groundout"; else { kind="single"; bases=1; }
+  } else if(infield){
+    kind="single"; bases=1;                              // blooper drops in
+  } else {
+    bases = depthRatio<0.62?1 : depthRatio<0.86?2 : 3;
+    kind  = bases===1?"single":bases===2?"double":"triple";
+  }
+  P.outcome={kind, out, bases};
+
+  if(out){
+    P.batter.target=1; P.batter.out=true;
+    P.runners.forEach(r=>{ if(!r.batter) r.target=r.origin; });
+  } else {
+    P.batter.target=bases;
+    P.runners.forEach(r=>{ if(!r.batter) r.target=Math.min(4, r.origin+bases); });
+  }
+
+  // throw to a base (gets the out at first on grounders; cosmetic otherwise)
+  const tgt = out ? B1 : (bases>=3? B3 : B2);
+  P.throw={ x0:f.x, y0:f.y, x1:tgt.x, y1:tgt.y, gx:f.x, gy:f.y, z:0, r:5, t:0,
+            len:Math.max(40, dist(f.x,f.y,tgt.x,tgt.y)) };
+
+  if(out) showMsg("GROUNDOUT! 🧤→1B", 1100, "#ff6b6b");
+  else    showMsg(kind.toUpperCase()+"! 🏃", 1000, "#7dffb0");
+}
+
+function finalizePlay(){
+  const P=G.play;
+  let scored=0;
+  const newBases=[false,false,false];
+  P.runners.forEach(r=>{
+    if(r.out) return;
+    if(r.scored){ scored++; return; }
+    const b=Math.round(r.coord);
+    if(b>=1 && b<=3) newBases[b-1]=true;
+  });
+  const out = !!(P.outcome && P.outcome.out);
+
+  G.fielders.forEach(f=> f.hasBall=false);
+  G.bases = newBases;
+  G.play = null;
+
+  if(scored>0) addRuns(scored);
+
+  if(out){
+    G.outs++; updateCounts();
+    setTimeout(G.outs>=3 ? endHalfInning : nextBatter, 1100);
+  } else {
+    if(scored>0) showMsg(`${scored} RUN${scored>1?"S":""} SCORE${scored>1?"":"S"}! 🎉`, 1200, "#ffd23a");
+    setTimeout(nextBatter, 950);
   }
 }
 
@@ -959,10 +1116,11 @@ function addRuns(n){
 }
 
 function nextBatter(){
-  // reset count, clear runner anims
+  // reset count, clear play state, send fielders home
   G.balls=0; G.strikes=0;
   G.runners=[];
-  G.ball=null; G.pitch=null; G.swing=null;
+  G.ball=null; G.pitch=null; G.swing=null; G.play=null;
+  resetFielders();
   updateCounts();
   nextPitchReady();
 }
@@ -970,7 +1128,8 @@ function nextBatter(){
 function nextPitchReady(){
   G.balls=Math.min(G.balls,3);
   G.phase="ready";
-  G.pitch=null; G.swing=null; G.ball=null;
+  G.pitch=null; G.swing=null; G.ball=null; G.play=null;
+  resetFielders();
   pitchBtn.disabled = isCPUbatting();
   // if CPU is batting (fielding team is the human's... we let human always be Dodgers)
   if(isCPUbatting()){
@@ -989,6 +1148,7 @@ function endHalfInning(){
   // clear bases/outs
   G.bases=[false,false,false];
   G.outs=0; G.balls=0; G.strikes=0;
+  G.play=null; resetFielders();
   updateCounts();
 
   if(G.half==="top"){
@@ -1050,10 +1210,9 @@ function loop(){
   G.t++;
   if(G.phase!=="idle"){
     if(G.pitch) updatePitch();
-    if(G.ball && (G.ball.inPlay || G.ball.foul)) updateBallInPlay();
-    if(G.swing && !G.swing.contacted && G.swing.result!=="whiff") {}
+    if(G.ball && G.ball.foul) updateBallInPlay();
+    if(G.play) updatePlay();
     if(G.swing) G.swing.anim += 0.18;
-    updateRunners();
     cpuTick();
   }
   render();

@@ -33,6 +33,22 @@ Every defensive position is drawn on the diamond, just like real baseball:
 - The **batter** at the plate with a full swing animation
 - Base **runners** that round the bags when you get a hit
 
+## 🧤 Live fielding (it plays itself out)
+
+Once the ball is struck, nothing is pre-decided — the play is **simulated**:
+
+- The nearest fielder **runs** toward the ball (you'll see them sprint across
+  the grass).
+- Fly balls, line drives and pop-ups can be **caught in the air** for a
+  **flyout / lineout / popout** — if a fielder gets there in time.
+- Grounders are **fielded** and **thrown to first base**; whether you're out or
+  safe comes from a real timing race: fielder distance + throw time vs. how fast
+  the runner legs it out.
+- Balls into the gaps drop for **singles, doubles, and triples** depending on
+  how deep they land and how long the throw back takes.
+- The ball is drawn with a **shadow + height arc**, so you can read fly balls
+  vs. grounders.
+
 ## 📋 Baseball rules implemented
 
 - Balls & strikes count (4 balls = walk, 3 strikes = strikeout)
