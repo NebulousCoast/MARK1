@@ -49,6 +49,18 @@ Once the ball is struck, nothing is pre-decided — the play is **simulated**:
 - The ball is drawn with a **shadow + height arc**, so you can read fly balls
   vs. grounders.
 
+### Double plays, assists & tag outs
+
+- **Double plays** — a grounder with a runner on first and fewer than two outs
+  can be turned 6-4-3 style: force at second, relay to first.
+- **Force outs** — the lead forced runner (or the batter at first) is retired
+  when the throw beats them to the bag.
+- **Outfield assists / tag outs** — get greedy on the bases and an outfielder
+  will gun you down: runners are thrown out trying to take an extra base, and
+  batters are nailed trying to **stretch** a single into a double.
+- Runners hold up on catchable fly balls; runs don't count when the third out
+  is a force out — just like the real rules.
+
 ## 📋 Baseball rules implemented
 
 - Balls & strikes count (4 balls = walk, 3 strikes = strikeout)

@@ -867,11 +867,11 @@ function setupPlay(quality){
     catchBonus = 6;
   }
 
-  // landing point on screen
+  // landing point on screen (depth 1.0 ≈ the wall; >1.0 clears it)
   let lx = HOME.x + Math.sin(ang)*W*0.46*depth;
   let ly = HOME.y - Math.cos(ang)*(HOME.y-FENCE_Y)*depth;
   lx = Math.max(34, Math.min(W-34, lx));
-  ly = Math.max(FENCE_Y-34, ly);
+  ly = Math.max(12, ly);
 
   // nearest fielder to the landing spot pursues
   let fi=0, best=1e9;
@@ -891,22 +891,37 @@ function setupPlay(quality){
     willCatch = quality!=="homerun" && depth<1.0 && (fieldRun <= hang+slack+catchBonus);
   }
 
-  // runners: current base occupants + the batter
+  // runners: current base occupants + the batter, each with FORCE status.
+  // A runner is forced when every base behind them (toward home) is occupied.
+  const ob=[...G.bases];
   const runners=[];
-  for(let i=1;i<=3;i++){
-    if(G.bases[i-1]) runners.push({coord:i, origin:i, target:i, batter:false, scored:false, out:false});
-  }
-  const batter={coord:0, origin:0, target:1, batter:true, scored:false, out:false};
+  if(ob[0]) runners.push({coord:1, origin:1, target:1, batter:false, forced:true,         scored:false, out:false});
+  if(ob[1]) runners.push({coord:2, origin:2, target:2, batter:false, forced:ob[0],         scored:false, out:false});
+  if(ob[2]) runners.push({coord:3, origin:3, target:3, batter:false, forced:ob[0]&&ob[1],  scored:false, out:false});
+  const batter={coord:0, origin:0, target:1, batter:true, forced:true, scored:false, out:false};
   runners.push(batter);
-  if(quality==="homerun") runners.forEach(r=> r.target=4);  // everybody trots home
+
+  // do runners take off right away? (yes on grounders & balls that won't be caught)
+  const dr = (HOME.y-ly)/(HOME.y-FENCE_Y);
+  const infieldGB = (type==="grounder" && dr<0.42);
+  const willRun = (quality!=="homerun") && (type==="grounder" || !willCatch);
+  if(quality==="homerun"){
+    runners.forEach(r=> r.target=4);                       // everybody trots home
+  } else if(willRun){
+    runners.forEach(r=>{
+      if(r.batter) r.target=1;                             // batter heads to first
+      else if(infieldGB) r.target = r.forced ? r.origin+1 : r.origin; // only forced run
+      else r.target = Math.min(4, r.origin+1);             // a hit: everyone advances
+    });
+  }
 
   G.play={
     quality, type, ang, depth, lx, ly, fi,
     frame:0, stage:"flight", flightFrames, hang, arc, willCatch,
-    runnersGo:(type==="grounder" || quality==="homerun"),
+    runnersGo:(willRun || quality==="homerun"),
     ball:{ gx:HOME.x-30, gy:HOME.y-14, z:0, r:6 },
     sx:HOME.x-30, sy:HOME.y-14,
-    runners, batter, throw:null, outcome:null, doneTimer:0
+    runners, batter, throw:null, throwSeq:[], outsThisPlay:0, forceThirdOut:false, doneTimer:0
   };
   G.phase="result";
   showSwingMeter(false);
@@ -920,10 +935,10 @@ function setupPlay(quality){
 
 function advancePlayRunners(){
   G.play.runners.forEach(r=>{
-    if(r.scored || r.out) return;
+    if(r.scored) return;                 // out runners still jog to the bag they're tagged at
     if(r.coord < r.target){
       r.coord = Math.min(r.target, r.coord + RUNNER_CO);
-      if(r.coord >= 4-1e-6){ r.scored=true; r.coord=4; }
+      if(!r.out && r.coord >= 4-1e-6){ r.scored=true; r.coord=4; }
     }
   });
 }
@@ -953,11 +968,11 @@ function updatePlay(){
       } else if(P.type!=="grounder" && P.willCatch && dist(f.x,f.y,P.lx,P.ly)<24){
         // caught on the fly!
         f.hasBall=true; f.x=P.lx; f.y=P.ly; P.ball=null;
-        P.outcome={ kind:(P.type==="liner"?"lineout":P.type==="popup"?"popout":"flyout"), out:true };
-        P.batter.target=1; P.batter.out=true;
-        P.runners.forEach(r=>{ if(!r.batter) r.target=r.origin; });
+        const kind = P.type==="liner"?"lineout":P.type==="popup"?"popout":"flyout";
+        P.batter.target=1; P.batter.out=true; P.outsThisPlay=1;
+        P.runners.forEach(r=>{ if(!r.batter) r.target=r.origin; });  // runners hold
         P.runnersGo=true; P.stage="caught"; P.doneTimer=40;
-        showMsg(P.outcome.kind.toUpperCase()+"! 🧤", 1000, "#ff6b6b");
+        showMsg(kind.toUpperCase()+"! 🧤", 1000, "#ff6b6b");
       } else {
         P.ball.z=0; P.runnersGo=true; P.stage="secure";
       }
@@ -981,9 +996,9 @@ function updatePlay(){
       P.throw.gx = P.throw.x0+(P.throw.x1-P.throw.x0)*P.throw.t;
       P.throw.gy = P.throw.y0+(P.throw.y1-P.throw.y0)*P.throw.t;
       P.throw.z  = Math.sin(Math.PI*P.throw.t)*22;
-      if(P.throw.t>=1) P.throw=null;
+      if(P.throw.t>=1) startNextThrow();   // chain relay throws (double plays)
     }
-    if(!P.throw && runnersSettled()) finalizePlay();
+    if(!P.throw && (!P.throwSeq || P.throwSeq.length===0) && runnersSettled()) finalizePlay();
     return;
   }
 
@@ -994,39 +1009,100 @@ function updatePlay(){
   }
 }
 
+// pull the next queued throw off the sequence and start animating it
+function startNextThrow(){
+  const P=G.play;
+  if(P.throwSeq && P.throwSeq.length){
+    const s=P.throwSeq.shift();
+    const B=BASES[s.base%4];
+    P.throw={ x0:s.x0, y0:s.y0, x1:B.x, y1:B.y, gx:s.x0, gy:s.y0, z:0, r:5, t:0,
+              len:Math.max(40, dist(s.x0,s.y0,B.x,B.y)) };
+  } else {
+    P.throw=null;
+  }
+}
+
+const ASSIST_MARGIN  = 9;   // defense must clearly beat the runner to nab them
+
 function decidePlay(){
   const P=G.play, f=G.fielders[P.fi];
   const depthRatio=(HOME.y-P.ly)/(HOME.y-FENCE_Y);
-  const infield = depthRatio < 0.42;
-  let kind, bases=0, out=false;
+  const baseXY = b => BASES[b%4];
+  const farPen = d => d>200 ? 10 : 0;                       // long throws need a cutoff
+  const tf = (x,y,b)=>{ const d=dist(x,y,baseXY(b).x,baseXY(b).y); return d/THROW_SPEED + TRANSFER + farPen(d); };
+  const rf = (r,b)=> (b - r.coord)/RUNNER_CO;               // frames for runner to reach base b
+  const batter=P.batter;
+  const r1=P.runners.find(r=>!r.batter && r.origin===1);
+  const r2=P.runners.find(r=>!r.batter && r.origin===2);
+  const r3=P.runners.find(r=>!r.batter && r.origin===3);
+  const markOut=(r,b)=>{ r.out=true; r.outAt=b; r.target=b; P.outsThisPlay++; };
+  let kind;
 
-  if(P.type==="grounder" && infield){
-    const throwFrames = dist(P.lx,P.ly,B1.x,B1.y)/THROW_SPEED + TRANSFER;
-    out = (P.frame + throwFrames) < RUNNER_FIRST;       // beat the runner?
-    if(out) kind="groundout"; else { kind="single"; bases=1; }
-  } else if(infield){
-    kind="single"; bases=1;                              // blooper drops in
+  if(P.type==="grounder" && depthRatio < 0.42){
+    // ---------------- infield grounder: force / double play ----------------
+    if(r1 && G.outs<2){
+      // 6-4-3 turn: force at second, relay to first
+      const ballTo2 = tf(f.x,f.y,2);
+      const got2 = ballTo2 < rf(r1,2) + 18;        // lead force is routine on a grounder
+      P.throwSeq.push({x0:f.x, y0:f.y, base:2});
+      if(got2){
+        markOut(r1,2);
+        // turn two? a clean pivot on a sharp grounder nabs the batter at first
+        const sharp = ballTo2 < rf(r1,2) - 4;       // ball got there with room to spare
+        const turn = sharp ? (Math.random()<0.7) : (Math.random()<0.35);
+        P.throwSeq.push({x0:baseXY(2).x, y0:baseXY(2).y, base:1});
+        if(turn){ markOut(batter,1); kind="dp"; }
+        else { batter.target=1; kind="forceout"; }
+        P.forceThirdOut=true;
+      } else {
+        batter.target=1; r1.target=2; kind="single";
+      }
+      if(r2) r2.target = r2.forced?3:2;
+      if(r3) r3.target = r3.forced?4:3;
+    } else {
+      // straight play at first
+      const ballTo1 = tf(f.x,f.y,1);
+      const got = ballTo1 < rf(batter,1);
+      P.throwSeq.push({x0:f.x, y0:f.y, base:1});
+      if(got){ markOut(batter,1); kind="groundout"; P.forceThirdOut=true; }
+      else { batter.target=1; kind="single"; }
+      if(r1) r1.target=2;
+      if(r2) r2.target = r2.forced?3:2;
+      if(r3) r3.target = r3.forced?4:3;
+    }
   } else {
-    bases = depthRatio<0.62?1 : depthRatio<0.86?2 : 3;
-    kind  = bases===1?"single":bases===2?"double":"triple";
+    // ---------------- ball to the outfield: clean hit, runners safe --------
+    const bases = depthRatio<0.62?1 : depthRatio<0.86?2 : 3;
+    batter.target=bases;
+    if(r1) r1.target=Math.min(4, 1+bases);
+    if(r2) r2.target=Math.min(4, 2+bases);
+    if(r3) r3.target=Math.min(4, 3+bases);
+    kind = bases===1?"single":bases===2?"double":"triple";
+
+    // aggressive baserunning — a lead runner or the batter tries for an EXTRA
+    // base, risking an outfield assist / tag out at that base.
+    let agg=null;
+    const lead = r3||r2||r1;
+    if(lead && lead.origin+bases<4 && Math.random()<0.40) agg=lead;
+    else if(bases===1 && Math.random()<0.18) agg=batter;
+    if(agg){
+      const tb = (agg.batter?bases:agg.origin+bases) + 1;   // one base beyond the safe stop
+      if(tb<=4){
+        const beat = tf(f.x,f.y,tb) < rf(agg,tb) - ASSIST_MARGIN;
+        P.throwSeq.push({x0:f.x, y0:f.y, base:tb});
+        if(beat){ markOut(agg,tb); kind = agg.batter?"stretch":"assist"; }
+        else { agg.target=tb; }                              // took the extra base safely
+      }
+    }
   }
-  P.outcome={kind, out, bases};
 
-  if(out){
-    P.batter.target=1; P.batter.out=true;
-    P.runners.forEach(r=>{ if(!r.batter) r.target=r.origin; });
-  } else {
-    P.batter.target=bases;
-    P.runners.forEach(r=>{ if(!r.batter) r.target=Math.min(4, r.origin+bases); });
-  }
+  P.kind=kind;
+  const M={ dp:"DOUBLE PLAY! 🔥", forceout:"FORCE OUT! 🧤", groundout:"GROUNDOUT! 🧤→1B",
+            assist:"OUTFIELD ASSIST — TAGGED OUT! 🎯", stretch:"THROWN OUT STRETCHING! 🎯",
+            single:"SINGLE! 🏃", double:"DOUBLE! 🏃", triple:"TRIPLE!! 🏃💨" };
+  showMsg(M[kind]||"IN PLAY", 1200, P.outsThisPlay>0?"#ff6b6b":"#7dffb0");
 
-  // throw to a base (gets the out at first on grounders; cosmetic otherwise)
-  const tgt = out ? B1 : (bases>=3? B3 : B2);
-  P.throw={ x0:f.x, y0:f.y, x1:tgt.x, y1:tgt.y, gx:f.x, gy:f.y, z:0, r:5, t:0,
-            len:Math.max(40, dist(f.x,f.y,tgt.x,tgt.y)) };
-
-  if(out) showMsg("GROUNDOUT! 🧤→1B", 1100, "#ff6b6b");
-  else    showMsg(kind.toUpperCase()+"! 🏃", 1000, "#7dffb0");
+  startNextThrow();
 }
 
 function finalizePlay(){
@@ -1035,11 +1111,14 @@ function finalizePlay(){
   const newBases=[false,false,false];
   P.runners.forEach(r=>{
     if(r.out) return;
-    if(r.scored){ scored++; return; }
+    if(r.scored || r.coord>=4-1e-6){ scored++; return; }
     const b=Math.round(r.coord);
     if(b>=1 && b<=3) newBases[b-1]=true;
   });
-  const out = !!(P.outcome && P.outcome.out);
+  const outsAdded = P.outsThisPlay||0;
+
+  // a run does not count if the 3rd out is a force out / batter out at first
+  if(P.forceThirdOut && (G.outs+outsAdded)>=3) scored=0;
 
   G.fielders.forEach(f=> f.hasBall=false);
   G.bases = newBases;
@@ -1047,9 +1126,11 @@ function finalizePlay(){
 
   if(scored>0) addRuns(scored);
 
-  if(out){
-    G.outs++; updateCounts();
-    setTimeout(G.outs>=3 ? endHalfInning : nextBatter, 1100);
+  if(outsAdded>0){
+    G.outs = Math.min(3, G.outs+outsAdded);
+    updateCounts();
+    if(scored>0 && G.outs<3) showMsg(`${scored} RUN${scored>1?"S":""} IN! 🎉`, 1200, "#ffd23a");
+    setTimeout(G.outs>=3 ? endHalfInning : nextBatter, 1200);
   } else {
     if(scored>0) showMsg(`${scored} RUN${scored>1?"S":""} SCORE${scored>1?"":"S"}! 🎉`, 1200, "#ffd23a");
     setTimeout(nextBatter, 950);
