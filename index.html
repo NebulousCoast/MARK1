@@ -204,11 +204,11 @@ const meterEl = document.getElementById('swingmeter');
 //==================================================================
 // FIELD GEOMETRY  (view from behind home plate, looking to outfield)
 //==================================================================
-const HOME = {x:W/2, y:H-90};                 // home plate (near, bottom)
-const MOUND= {x:W/2, y:H*0.46};               // pitcher's mound (center)
-const B1   = {x:W*0.70, y:H*0.55};            // first base (right)
-const B2   = {x:W/2,    y:H*0.34};            // second base (far center)
-const B3   = {x:W*0.30, y:H*0.55};            // third base (left)
+const HOME = {x:W/2, y:H-80};                 // home plate (near, bottom)
+const MOUND= {x:W/2, y:H*0.69};               // pitcher's mound (center)
+const B1   = {x:W*0.66, y:H*0.645};           // first base (right)
+const B2   = {x:W/2,    y:H*0.50};            // second base (far center)
+const B3   = {x:W*0.34, y:H*0.645};           // third base (left)
 const BASES= [HOME,B1,B2,B3];                 // 0=home,1=1st,2=2nd,3=3rd
 
 //==================================================================
@@ -220,30 +220,30 @@ const TEAMS = {
 };
 
 // Defensive positions, laid out for our behind-the-plate view.
-// pos label + screen location for the 9 fielders.
+// Outfielders live in the outfield grass between the infield and the fence.
 function defensePositions(){
   return [
     {role:"P",  x:MOUND.x,     y:MOUND.y},        // pitcher
     {role:"C",  x:HOME.x,      y:HOME.y+34},      // catcher (behind plate)
-    {role:"1B", x:B1.x+14,     y:B1.y-6},
-    {role:"2B", x:W*0.585,     y:H*0.40},
-    {role:"3B", x:B3.x-14,     y:B3.y-6},
-    {role:"SS", x:W*0.415,     y:H*0.40},
-    {role:"LF", x:W*0.24,      y:H*0.20},
-    {role:"CF", x:W*0.50,      y:H*0.13},
-    {role:"RF", x:W*0.76,      y:H*0.20},
+    {role:"1B", x:B1.x+14,     y:B1.y-8},
+    {role:"2B", x:W*0.595,     y:H*0.555},
+    {role:"3B", x:B3.x-14,     y:B3.y-8},
+    {role:"SS", x:W*0.405,     y:H*0.555},
+    {role:"LF", x:W*0.235,     y:H*0.305},
+    {role:"CF", x:W*0.50,      y:H*0.255},
+    {role:"RF", x:W*0.765,     y:H*0.305},
   ];
 }
 
 //==================================================================
 // FIELDING PHYSICS / HELPERS
 //==================================================================
-const FENCE_Y      = H*0.40;     // outfield fence line (screen y)
+const FENCE_Y      = H*0.205;    // outfield fence line (far, near the top)
 const FIELDER_SPEED= 3.0;        // px / frame a fielder runs
 const THROW_SPEED  = 9.5;        // px / frame a thrown ball travels
 const TRANSFER     = 8;          // frames to glove->hand before a throw
 const ROLL_SPEED   = 7.0;        // px / frame a grounder rolls
-const RUNNER_FIRST = 74;         // frames for the batter to leg out first
+const RUNNER_FIRST = 80;         // frames for the batter to leg out first
 const RUNNER_CO    = 1/RUNNER_FIRST; // base-coords advanced per frame
 
 function dist(ax,ay,bx,by){ return Math.hypot(ax-bx, ay-by); }
@@ -381,34 +381,37 @@ function hideMsg(){ msgEl.classList.remove('show'); }
 // DRAWING HELPERS — cartoon backyard players
 //==================================================================
 function drawDiamond(){
+  const fence=FENCE_Y;
   // sky
-  const sky=ctx.createLinearGradient(0,0,0,H*0.5);
+  const sky=ctx.createLinearGradient(0,0,0,fence+10);
   sky.addColorStop(0,"#7ec8ff"); sky.addColorStop(1,"#d7f0ff");
-  ctx.fillStyle=sky; ctx.fillRect(0,0,W,H*0.42);
+  ctx.fillStyle=sky; ctx.fillRect(0,0,W,fence+8);
 
-  // back fence
-  ctx.fillStyle="#caa66a"; ctx.fillRect(0,H*0.40,W,8);
+  // little houses / backyard vibe behind the fence
+  drawHouse(70,fence-46,"#e25b5b"); drawHouse(W-150,fence-46,"#5b9be2");
+
+  // outfield wall
+  ctx.fillStyle="#2f7d3a"; ctx.fillRect(0,fence,W,12);            // wall pad
+  ctx.fillStyle="#caa66a"; ctx.fillRect(0,fence-6,W,7);           // top rail
   ctx.fillStyle="#8a6b3a";
-  for(let x=0;x<W;x+=26){ ctx.fillRect(x,H*0.36,5,H*0.06); }
-  // little houses / backyard vibe
-  drawHouse(70,H*0.30,"#e25b5b"); drawHouse(W-150,H*0.30,"#5b9be2");
-  // bushes
+  for(let x=0;x<W;x+=26){ ctx.fillRect(x,fence-6,4,12); }         // posts
+  // bushes peeking over
   ctx.fillStyle="#3f8f2a";
-  for(let x=0;x<W;x+=50){ ctx.beginPath(); ctx.arc(x,H*0.41,18,Math.PI,0); ctx.fill(); }
+  for(let x=0;x<W;x+=50){ ctx.beginPath(); ctx.arc(x,fence-4,16,Math.PI,0); ctx.fill(); }
 
-  // grass
-  const grass=ctx.createLinearGradient(0,H*0.40,0,H);
+  // grass (outfield + infield)
+  const grass=ctx.createLinearGradient(0,fence,0,H);
   grass.addColorStop(0,"#6cba42"); grass.addColorStop(1,"#4f9c2d");
-  ctx.fillStyle=grass; ctx.fillRect(0,H*0.42,W,H);
+  ctx.fillStyle=grass; ctx.fillRect(0,fence+10,W,H);
 
-  // mowed stripes
+  // mowed stripes fanning out from deep center toward home
   ctx.save();
   ctx.globalAlpha=0.10;
-  for(let i=0;i<14;i++){
+  for(let i=0;i<16;i++){
     ctx.fillStyle = i%2? "#000":"#fff";
-    const y=H*0.42 + i*((H-H*0.42)/14);
     ctx.beginPath();
-    ctx.moveTo(W/2,H*0.42); ctx.lineTo(W*(i/14),H); ctx.lineTo(W*((i+1)/14),H);
+    ctx.moveTo(HOME.x, fence+10);
+    ctx.lineTo(W*(i/16), H); ctx.lineTo(W*((i+1)/16), H);
     ctx.closePath(); ctx.fill();
   }
   ctx.restore();
@@ -432,16 +435,16 @@ function drawDiamond(){
   // grass center of diamond
   ctx.fillStyle="#6cba42";
   ctx.beginPath();
-  ctx.moveTo(HOME.x,HOME.y-26);
-  ctx.lineTo(B1.x-26,B1.y);
-  ctx.lineTo(B2.x,B2.y+22);
-  ctx.lineTo(B3.x+26,B3.y);
+  ctx.moveTo(HOME.x,HOME.y-30);
+  ctx.lineTo(B1.x-30,B1.y);
+  ctx.lineTo(B2.x,B2.y+26);
+  ctx.lineTo(B3.x+30,B3.y);
   ctx.closePath(); ctx.fill();
 
-  // foul lines
+  // foul lines from home out to the corners of the fence
   ctx.strokeStyle="#fff"; ctx.lineWidth=3;
-  ctx.beginPath(); ctx.moveTo(HOME.x,HOME.y); ctx.lineTo(W*0.96,H*0.34); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(HOME.x,HOME.y); ctx.lineTo(W*0.04,H*0.34); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(HOME.x,HOME.y); ctx.lineTo(W*0.965,fence+12); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(HOME.x,HOME.y); ctx.lineTo(W*0.035,fence+12); ctx.stroke();
 
   // pitcher's mound
   ctx.fillStyle="#c9893f"; ctx.beginPath(); ctx.ellipse(MOUND.x,MOUND.y+8,34,18,0,0,7); ctx.fill();
@@ -862,16 +865,16 @@ function setupPlay(quality){
     catchBonus = -28;
   } else { // weak contact: pop-ups & soft grounders -> easy outs
     const r=Math.random();
-    type = r<0.50?"grounder" : r<0.80?"popup" : "liner";
+    type = r<0.45?"grounder" : r<0.70?"popup" : "liner";
     depth = 0.18 + Math.random()*0.34;
     catchBonus = 6;
   }
 
-  // landing point on screen
+  // landing point on screen (depth 1.0 ≈ the wall; >1.0 clears it)
   let lx = HOME.x + Math.sin(ang)*W*0.46*depth;
   let ly = HOME.y - Math.cos(ang)*(HOME.y-FENCE_Y)*depth;
   lx = Math.max(34, Math.min(W-34, lx));
-  ly = Math.max(FENCE_Y-34, ly);
+  ly = Math.max(12, ly);
 
   // nearest fielder to the landing spot pursues
   let fi=0, best=1e9;
